@@ -1,0 +1,157 @@
+#!/bin/bash
+
+LOG_FILE="/root/user_management.log"
+DATA_FILE="/root/event_bookings.csv"
+
+# Create data file if not exists
+touch "$DATA_FILE"
+
+# Trim log if larger than 5MB
+if [[ -f "$LOG_FILE" && $(stat -c%s "$LOG_FILE") -gt 5242880 ]]; then
+  echo "$(date): Log trimmed (exceeded 5MB)" > "$LOG_FILE"
+fi
+
+# Function: Log actions
+log_action() {
+  echo "$(date): $1" >> "$LOG_FILE"
+}
+
+# Check for conflicting booking
+is_conflict() {
+  local date="$1"
+  local venue="$2"
+  grep -q ",$date,$venue$" "$DATA_FILE"
+}
+
+# Function: Add User + Event Booking
+add_user() {
+  username=$(whiptail --title "Add User" --inputbox "Enter new username:" 10 50 3>&1 1>&2 2>&3)
+  if id "$username" &>/dev/null; then
+    whiptail --title "User Exists" --msgbox "User '$username' already exists." 10 50
+    return
+  fi
+
+  useradd -m "$username"
+  passwd "$username"
+
+  event_name=$(whiptail --title "Event" --inputbox "Enter Event Name for $username:" 10 50 3>&1 1>&2 2>&3)
+  event_date=$(whiptail --title "Date" --inputbox "Enter Event Date (YYYY-MM-DD):" 10 50 3>&1 1>&2 2>&3)
+  venue=$(whiptail --title "Venue" --inputbox "Enter Venue Name:" 10 50 3>&1 1>&2 2>&3)
+
+  # Check if date is in the future
+  today=$(date +%F)
+  if [[ "$event_date" < "$today" ]]; then
+    whiptail --title "Invalid Date" --msgbox "The event date must be in the future." 10 50
+    userdel -r "$username"
+    log_action "User $username not added due to past date: $event_date"
+    return
+  fi
+
+  if is_conflict "$event_date" "$venue"; then
+    whiptail --title "Conflict" --msgbox "Another user already has a booking at $venue on $event_date." 10 50
+    userdel -r "$username"
+    log_action "User $username not added due to booking conflict for event $event_name on $event_date at $venue"
+  else
+    echo "$username,$event_name,$event_date,$venue" >> "$DATA_FILE"
+    whiptail --title "Success" --msgbox "User and Event created!\n\nUser: $username\nEvent: $event_name\nDate: $event_date\nVenue: $venue" 12 60
+    log_action "Added user $username and booked event '$event_name' on $event_date at $venue"
+  fi
+}
+
+# Function: Delete User + Remove Booking
+delete_user() {
+  username=$(whiptail --title "Delete User" --inputbox "Enter username to delete:" 10 50 3>&1 1>&2 2>&3)
+  if id "$username" &>/dev/null; then
+    whiptail --title "Confirm Deletion" --yesno "Are you sure you want to delete '$username'?" 10 50
+    if [[ $? -eq 0 ]]; then
+      userdel -r "$username"
+      grep -v "^$username," "$DATA_FILE" > /tmp/temp.csv && mv /tmp/temp.csv "$DATA_FILE"
+      whiptail --title "Deleted" --msgbox "User '$username' and their bookings deleted." 10 50
+      log_action "Deleted user $username and their bookings"
+    fi
+  else
+    whiptail --title "Not Found" --msgbox "User '$username' does not exist." 10 50
+  fi
+}
+
+# Function: Modify User
+modify_user() {
+  username=$(whiptail --title "Modify User" --inputbox "Enter username to modify:" 10 50 3>&1 1>&2 2>&3)
+  if id "$username" &>/dev/null; then
+    newname=$(whiptail --title "Rename User" --inputbox "Enter new username for '$username':" 10 50 3>&1 1>&2 2>&3)
+    usermod -l "$newname" "$username"
+    sed -i "s/^$username,/$newname,/" "$DATA_FILE"
+    whiptail --title "Updated" --msgbox "User renamed to '$newname'." 10 50
+    log_action "Renamed $username to $newname"
+  else
+    whiptail --title "Not Found" --msgbox "User '$username' does not exist." 10 50
+  fi
+}
+
+# Function: List Users
+list_users() {
+  getent passwd | awk -F: '$3 >= 1000 && $7 !~ /nologin/ { print $1 }' > /tmp/user_list.txt
+  if [[ -s /tmp/user_list.txt ]]; then
+    whiptail --title "User List" --textbox /tmp/user_list.txt 20 50
+  else
+    whiptail --title "No Users" --msgbox "No standard users found." 10 50
+  fi
+  rm -f /tmp/user_list.txt
+}
+
+# Function: View All Bookings
+view_bookings() {
+  if [[ ! -s $DATA_FILE ]]; then
+    whiptail --title "No Bookings" --msgbox "No bookings available." 10 50
+    return
+  fi
+
+  current_date=$(date +%Y-%m-%d)
+
+  awk -v current_date="$current_date" 'BEGIN {FS=","} {
+    if (NF==4 && $1 != "" && $2 != "" && $3 != "" && $4 != "") {
+      if ($3 >= current_date) print $0
+    }
+  }' "$DATA_FILE" | column -t -s, > /tmp/bookings.txt
+
+  if [[ -s /tmp/bookings.txt ]]; then
+    whiptail --title "Bookings" --textbox /tmp/bookings.txt 20 60
+  else
+    whiptail --title "No Future Bookings" --msgbox "No future bookings available." 10 50
+  fi
+
+  rm -f /tmp/bookings.txt
+}
+
+# Function: Clear Log File
+clear_logs() {
+  > "$LOG_FILE"
+  whiptail --title "Logs Cleared" --msgbox "Log file has been cleared." 10 50
+}
+
+# Menu loop
+while true; do
+  choice=$(whiptail --title "Cosmic Occasions" \
+    --backtitle "Manage Users + Events • Log: $LOG_FILE" \
+    --menu "Choose an option:" 20 60 12 \
+    1 "Add User + Event Booking" \
+    2 "Delete User + Booking" \
+    3 "Modify User Name" \
+    4 "List All Users" \
+    5 "View Log File" \
+    6 "View All Bookings" \
+    7 "Clear Log File" \
+    0 "Exit" 3>&1 1>&2 2>&3)
+
+  case $choice in
+    1) add_user ;;
+    2) delete_user ;;
+    3) modify_user ;;
+    4) list_users ;;
+    5) whiptail --title "Log File" --textbox "$LOG_FILE" 20 60 ;;
+    6) view_bookings ;;
+    7) clear_logs ;;
+    0) whiptail --title "Goodbye" --msgbox "Thanks for using the User Manager!" 10 50; break ;;
+    *) whiptail --title "Invalid" --msgbox "Please choose a valid option." 10 50 ;;
+  esac
+done
